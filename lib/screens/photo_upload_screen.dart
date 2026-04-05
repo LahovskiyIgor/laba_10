@@ -1,5 +1,7 @@
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:async';
+import 'dart:isolate';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:image/image.dart' as img;
@@ -16,6 +18,7 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
   img.Image? _originalImage;
   img.Image? _fftImage;
   final ImagePicker _picker = ImagePicker();
+  bool _isProcessing = false;
 
   Future<void> _pickImage() async {
     try {
@@ -27,7 +30,7 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
       if (pickedFile != null) {
         final bytes = await pickedFile.readAsBytes();
         final decodedImage = img.decodeImage(bytes);
-        
+
         if (decodedImage != null) {
           setState(() {
             _selectedImage = File(pickedFile.path);
@@ -46,22 +49,71 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
   }
 
   /// Быстрое преобразование Фурье для изображения в градациях серого
-  void _applyFFT() {
-    if (_originalImage == null) return;
+  Future<void> _applyFFT() async {
+    if (_originalImage == null || _isProcessing) return;
 
-    // Конвертируем в градации серого
-    final grayImage = img.grayscale(_originalImage!);
-    final width = grayImage.width;
-    final height = grayImage.height;
+    setState(() {
+      _isProcessing = true;
+    });
 
-    // Создаем комплексные данные (вещественная и мнимая части)
+    try {
+      // Подготовка данных для изолята
+      final width = _originalImage!.width;
+      final height = _originalImage!.height;
+      
+      // Конвертируем в градации серого заранее
+      final grayImage = img.grayscale(_originalImage!);
+      
+      // Создаем плоские массивы для передачи в изолят
+      List<double> realData = List.filled(width * height, 0.0);
+      List<double> imagData = List.filled(width * height, 0.0);
+
+      // Заполняем вещественную часть данными изображения
+      for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+          realData[y * width + x] = grayImage.getPixel(x, y).r.toDouble();
+        }
+      }
+
+      // Запускаем вычисления в изоляте
+      final result = await compute(_computeFFT, {
+        'real': realData,
+        'imag': imagData,
+        'width': width,
+        'height': height,
+      });
+
+      setState(() {
+        _fftImage = result;
+        _isProcessing = false;
+      });
+    } catch (e) {
+      setState(() {
+        _isProcessing = false;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Ошибка при применении БПФ: $e')),
+        );
+      }
+    }
+  }
+
+  /// Функция для вычисления БПФ в изоляте
+  static img.Image _computeFFT(Map<String, dynamic> data) {
+    final List<double> realData = data['real'] as List<double>;
+    final List<double> imagData = data['imag'] as List<double>;
+    final int width = data['width'] as int;
+    final int height = data['height'] as int;
+
+    // Преобразуем плоские массивы в 2D
     List<List<double>> real = List.generate(height, (_) => List.filled(width, 0.0));
     List<List<double>> imag = List.generate(height, (_) => List.filled(width, 0.0));
 
-    // Заполняем вещественную часть данными изображения
     for (int y = 0; y < height; y++) {
       for (int x = 0; x < width; x++) {
-        real[y][x] = grayImage.getPixel(x, y).r.toDouble();
+        real[y][x] = realData[y * width + x];
+        imag[y][x] = imagData[y * width + x];
       }
     }
 
@@ -84,7 +136,7 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
     // Вычисляем магнитуду спектра
     List<List<double>> magnitude = List.generate(height, (_) => List.filled(width, 0.0));
     double maxMag = 0;
-    
+
     for (int y = 0; y < height; y++) {
       for (int x = 0; x < width; x++) {
         magnitude[y][x] = math.sqrt(real[y][x] * real[y][x] + imag[y][x] * imag[y][x]);
@@ -98,7 +150,7 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
     List<List<double>> shiftedMagnitude = List.generate(height, (_) => List.filled(width, 0.0));
     int cx = width ~/ 2;
     int cy = height ~/ 2;
-    
+
     for (int y = 0; y < height; y++) {
       for (int x = 0; x < width; x++) {
         int newX = (x + cx) % width;
@@ -134,13 +186,11 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
       }
     }
 
-    setState(() {
-      _fftImage = resultImage;
-    });
+    return resultImage;
   }
 
   /// Одномерное БПФ (алгоритм Кули-Тьюки)
-  void _fft1D(List<double> real, List<double> imag) {
+  static void _fft1D(List<double> real, List<double> imag) {
     int n = real.length;
     if (n <= 1) return;
 
@@ -169,23 +219,23 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
       double angle = -2 * math.pi / m;
       double wr = math.cos(angle);
       double wi = math.sin(angle);
-      
+
       for (int i = 0; i < n; i += m) {
         double wkr = 1.0;
         double wki = 0.0;
-        
+
         for (int k = 0; k < m ~/ 2; k++) {
           int evenIdx = i + k;
           int oddIdx = i + k + m ~/ 2;
-          
+
           double tr = wkr * real[oddIdx] - wki * imag[oddIdx];
           double ti = wkr * imag[oddIdx] + wki * real[oddIdx];
-          
+
           real[oddIdx] = real[evenIdx] - tr;
           imag[oddIdx] = imag[evenIdx] - ti;
           real[evenIdx] += tr;
           imag[evenIdx] += ti;
-          
+
           double tempWkr = wkr * wr - wki * wi;
           wki = wkr * wi + wki * wr;
           wkr = tempWkr;
@@ -212,15 +262,17 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
                   padding: const EdgeInsets.all(16.0),
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(12),
-                    child: _fftImage != null
-                        ? Image.memory(
-                            Uint8List.fromList(img.encodePng(_fftImage!)),
-                            fit: BoxFit.contain,
-                          )
-                        : Image.file(
-                            _selectedImage!,
-                            fit: BoxFit.contain,
-                          ),
+                    child: _isProcessing
+                        ? const Center(child: CircularProgressIndicator())
+                        : _fftImage != null
+                            ? Image.memory(
+                                Uint8List.fromList(img.encodePng(_fftImage!)),
+                                fit: BoxFit.contain,
+                              )
+                            : Image.file(
+                                _selectedImage!,
+                                fit: BoxFit.contain,
+                              ),
                   ),
                 ),
               )
@@ -241,7 +293,7 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 ElevatedButton.icon(
-                  onPressed: _pickImage,
+                  onPressed: _isProcessing ? null : _pickImage,
                   icon: const Icon(Icons.photo_library),
                   label: const Text('Выбрать из галереи'),
                   style: ElevatedButton.styleFrom(
@@ -251,7 +303,7 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
                 if (_originalImage != null) ...[
                   const SizedBox(width: 16),
                   ElevatedButton.icon(
-                    onPressed: _applyFFT,
+                    onPressed: _isProcessing ? null : _applyFFT,
                     icon: const Icon(Icons.waves),
                     label: const Text('Применить БПФ'),
                     style: ElevatedButton.styleFrom(
@@ -260,11 +312,13 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
                   ),
                   const SizedBox(width: 16),
                   ElevatedButton.icon(
-                    onPressed: () {
-                      setState(() {
-                        _fftImage = null;
-                      });
-                    },
+                    onPressed: _isProcessing
+                        ? null
+                        : () {
+                            setState(() {
+                              _fftImage = null;
+                            });
+                          },
                     icon: const Icon(Icons.refresh),
                     label: const Text('Оригинал'),
                     style: ElevatedButton.styleFrom(
