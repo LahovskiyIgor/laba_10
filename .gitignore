@@ -1,75 +1,41 @@
 ```
-# Build artifacts
-/build/
-/ios/Flutter/flutter_assets/
+# Flutter/Dart specific
+.dart_tool/
+.build/
+packages/
+*.iws
+*.sw?
+.DS_Store
+flutter/
 
-# Distribution directory (for packages)
-/pubspec.lock
-/.dart_tool/
-/.flutter-plugins
-/.flutter-plugins-dependencies
-/.packages
+# Dependencies
+.pub/
+.dart_tool/
+build/
 
-# iOS
-/ios/Pods/
-/ios/.symlinks/
-/ios/Flutter/engine/
-/ios/Flutter/App.framework
-/ios/Flutter/Flutter.framework
-/ios/Flutter/Flutter.podspec
-/ios/Flutter/Generated.xcconfig
-/ios/Flutter/ephemeral/
-
-# Android
-/android/.gradle/
-/android/build/
-/android/app/build/
-/android/gradle/wrapper/dists/
-/android/gradlew
-/android/gradlew.bat
-/android/local.properties
-
-# Log files
-*.log
-
-# Environment variables
+# Environment
 .env
 .env.local
-*.env.*
+.env.*
 
-# IDE files
-.vscode/
+# Logs
+*.log
+**/logs
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# IDE related
 .idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
 *.swp
 *.swo
+
+# Temporary files
 *.tmp
-
-# Coverage
-/coverage/
-/htmlcov/
-.coverage
-
-# Compressed files
-*.zip
-*.gz
-*.tar
-*.tgz
-*.bz2
-*.xz
-*.7z
-*.rar
-*.zst
-*.lz4
-*.lzh
-*.cab
-*.arj
-*.rpm
-*.deb
-*.Z
-*.lz
-*.lzo
-*.tar.gz
-*.tar.bz2
-*.tar.xz
-*.tar.zst
+*~
 ```
