@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:async';
 import 'dart:isolate';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:image/image.dart' as img;
@@ -52,35 +53,39 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
   Future<void> _applyFFT() async {
     if (_originalImage == null || _isProcessing) return;
 
-    setState(() {
-      _isProcessing = true;
-    });
+    setState(() => _isProcessing = true);
 
     try {
-      // Подготовка данных для изолята
-      final width = _originalImage!.width;
-      final height = _originalImage!.height;
-      
-      // Конвертируем в градации серого заранее
-      final grayImage = img.grayscale(_originalImage!);
-      
-      // Создаем плоские массивы для передачи в изолят
-      List<double> realData = List.filled(width * height, 0.0);
-      List<double> imagData = List.filled(width * height, 0.0);
+      // 1. ОПРЕДЕЛЯЕМ РАЗМЕР (Степень двойки обязательна для Cooley-Tukey)
+      // Ограничиваем до 512 или 1024, чтобы не перегружать память мобилки
+      int targetWidth = _toPowerOfTwo(math.min(_originalImage!.width, 1024));
+      int targetHeight = _toPowerOfTwo(math.min(_originalImage!.height, 1024));
 
-      // Заполняем вещественную часть данными изображения
-      for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-          realData[y * width + x] = grayImage.getPixel(x, y).r.toDouble();
-        }
+      // 2. РЕСАЙЗ И ГРЕЙСКЕЙЛ
+      final resizedImg = img.copyResize(
+          _originalImage!,
+          width: targetWidth,
+          height: targetHeight,
+          interpolation: img.Interpolation.average
+      );
+      final grayImage = img.grayscale(resizedImg);
+
+      // 3. ИСПОЛЬЗУЕМ TYPED DATA (Float64List работает в разы быстрее)
+      final realData = Float64List(targetWidth * targetHeight);
+      final imagData = Float64List(targetWidth * targetHeight);
+
+      int index = 0;
+      for (var pixel in grayImage) {
+        // pixel.r — это значение красного канала (в грейскейле r=g=b)
+        realData[index] = pixel.r.toDouble();
+        index++;
       }
 
-      // Запускаем вычисления в изоляте
       final result = await compute(_computeFFT, {
         'real': realData,
         'imag': imagData,
-        'width': width,
-        'height': height,
+        'width': targetWidth,
+        'height': targetHeight,
       });
 
       setState(() {
@@ -88,27 +93,29 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
         _isProcessing = false;
       });
     } catch (e) {
-      setState(() {
-        _isProcessing = false;
-      });
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Ошибка при применении БПФ: $e')),
-        );
-      }
+      setState(() => _isProcessing = false);
+      // ... обработка ошибок
     }
+  }
+  int _toPowerOfTwo(int n) {
+    int p = 1;
+    while (p * 2 <= n) {
+      p *= 2;
+    }
+    return p;
   }
 
   /// Функция для вычисления БПФ в изоляте
   static img.Image _computeFFT(Map<String, dynamic> data) {
-    final List<double> realData = data['real'] as List<double>;
-    final List<double> imagData = data['imag'] as List<double>;
+    // Явное приведение к Float64List
+    final Float64List realData = data['real'] as Float64List;
+    final Float64List imagData = data['imag'] as Float64List;
     final int width = data['width'] as int;
     final int height = data['height'] as int;
 
-    // Преобразуем плоские массивы в 2D
-    List<List<double>> real = List.generate(height, (_) => List.filled(width, 0.0));
-    List<List<double>> imag = List.generate(height, (_) => List.filled(width, 0.0));
+    // Используем Float64List для каждой строки для совместимости с _fft1D
+    List<Float64List> real = List.generate(height, (_) => Float64List(width));
+    List<Float64List> imag = List.generate(height, (_) => Float64List(width));
 
     for (int y = 0; y < height; y++) {
       for (int x = 0; x < width; x++) {
@@ -119,14 +126,20 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
 
     // Применяем БПФ по строкам
     for (int y = 0; y < height; y++) {
-      _fft1D(real[y], imag[y]);
+      _fft1D(real[y], imag[y]); // Теперь ошибки не будет
     }
 
     // Применяем БПФ по столбцам
     for (int x = 0; x < width; x++) {
-      List<double> colReal = List.generate(height, (y) => real[y][x]);
-      List<double> colImag = List.generate(height, (y) => imag[y][x]);
-      _fft1D(colReal, colImag);
+      Float64List colReal = Float64List(height);
+      Float64List colImag = Float64List(height);
+      for (int y = 0; y < height; y++) {
+        colReal[y] = real[y][x];
+        colImag[y] = imag[y][x];
+      }
+
+      _fft1D(colReal, colImag); // И здесь тоже
+
       for (int y = 0; y < height; y++) {
         real[y][x] = colReal[y];
         imag[y][x] = colImag[y];
@@ -161,27 +174,24 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
 
     // Логарифмическое масштабирование для визуализации
     List<List<double>> logMagnitude = List.generate(height, (_) => List.filled(width, 0.0));
-    for (int y = 0; y < height; y++) {
-      for (int x = 0; x < width; x++) {
-        logMagnitude[y][x] = math.log(1 + shiftedMagnitude[y][x] / maxMag * 255);
-      }
-    }
-
-    // Нормализуем и создаем изображение результата
     double maxLog = 0;
+
     for (int y = 0; y < height; y++) {
       for (int x = 0; x < width; x++) {
-        if (logMagnitude[y][x] > maxLog) {
-          maxLog = logMagnitude[y][x];
-        }
+        // Формула: c * log(1 + |F|)
+        double val = math.log(1 + shiftedMagnitude[y][x]);
+        logMagnitude[y][x] = val;
+        if (val > maxLog) maxLog = val;
       }
     }
 
+// 3. Нормализуем к диапазону 0-255
     final resultImage = img.Image(width: width, height: height);
     for (int y = 0; y < height; y++) {
       for (int x = 0; x < width; x++) {
-        int value = (logMagnitude[y][x] / maxLog * 255).toInt();
-        value = value.clamp(0, 255);
+        int value = maxLog > 0
+            ? (logMagnitude[y][x] / maxLog * 255).toInt()
+            : 0;
         resultImage.setPixelRgba(x, y, value, value, value, 255);
       }
     }
@@ -190,58 +200,52 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
   }
 
   /// Одномерное БПФ (алгоритм Кули-Тьюки)
-  static void _fft1D(List<double> real, List<double> imag) {
-    int n = real.length;
-    if (n <= 1) return;
+  static void _fft1D(Float64List real, Float64List imag) {
+    final int n = real.length;
+    // Теперь n всегда 2^k, поэтому алгоритм отработает корректно
 
-    // Битовая реверсия
     int j = 0;
-    for (int i = 0; i < n - 1; i++) {
+    for (int i = 0; i < n; i++) {
       if (i < j) {
-        double tempR = real[i];
-        double tempI = imag[i];
+        final tempR = real[i];
+        final tempI = imag[i];
         real[i] = real[j];
         imag[i] = imag[j];
         real[j] = tempR;
         imag[j] = tempI;
       }
-      int k = n ~/ 2;
-      while (k <= j) {
-        j -= k;
-        k ~/= 2;
+      int m = n >> 1; // Битовый сдвиг вместо ~/ 2
+      while (m >= 1 && j >= m) {
+        j -= m;
+        m >>= 1;
       }
-      j += k;
+      j += m;
     }
 
-    // Бабочка
-    int m = 2;
-    while (m <= n) {
-      double angle = -2 * math.pi / m;
-      double wr = math.cos(angle);
-      double wi = math.sin(angle);
-
-      for (int i = 0; i < n; i += m) {
-        double wkr = 1.0;
-        double wki = 0.0;
-
-        for (int k = 0; k < m ~/ 2; k++) {
-          int evenIdx = i + k;
-          int oddIdx = i + k + m ~/ 2;
-
-          double tr = wkr * real[oddIdx] - wki * imag[oddIdx];
-          double ti = wkr * imag[oddIdx] + wki * real[oddIdx];
-
-          real[oddIdx] = real[evenIdx] - tr;
-          imag[oddIdx] = imag[evenIdx] - ti;
-          real[evenIdx] += tr;
-          imag[evenIdx] += ti;
-
-          double tempWkr = wkr * wr - wki * wi;
-          wki = wkr * wi + wki * wr;
-          wkr = tempWkr;
+    // Основной цикл бабочки
+    for (int len = 2; len <= n; len <<= 1) {
+      double ang = 2 * math.pi / len * -1;
+      double wlenR = math.cos(ang);
+      double wlenI = math.sin(ang);
+      for (int i = 0; i < n; i += len) {
+        double wR = 1;
+        double wI = 0;
+        for (int k = 0; k < len / 2; k++) {
+          int uIdx = i + k;
+          int vIdx = i + k + len ~/ 2;
+          double uR = real[uIdx];
+          double uI = imag[uIdx];
+          double vR = real[vIdx] * wR - imag[vIdx] * wI;
+          double vI = real[vIdx] * wI + imag[vIdx] * wR;
+          real[uIdx] = uR + vR;
+          imag[uIdx] = uI + vI;
+          real[vIdx] = uR - vR;
+          imag[vIdx] = uI - vI;
+          double nextWR = wR * wlenR - wI * wlenI;
+          wI = wR * wlenI + wI * wlenR;
+          wR = nextWR;
         }
       }
-      m *= 2;
     }
   }
 

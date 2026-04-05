@@ -1,0 +1,1 @@
+ D:\\PROJECTS\\ANDROID\\laba_10\\.dart_tool\\flutter_build\\e607311d10321c54e6f7c287724dc003\\native_assets.json: 
