@@ -17,7 +17,8 @@ class PhotoUploadScreen extends StatefulWidget {
 class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
   File? _selectedImage;
   img.Image? _originalImage;
-  img.Image? _fftImage;
+  img.Image? _processedImage;
+  String _currentFilter = 'original';
   final ImagePicker _picker = ImagePicker();
   bool _isProcessing = false;
 
@@ -36,7 +37,8 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
           setState(() {
             _selectedImage = File(pickedFile.path);
             _originalImage = decodedImage;
-            _fftImage = null;
+            _processedImage = null;
+            _currentFilter = 'original';
           });
         }
       }
@@ -89,12 +91,17 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
       });
 
       setState(() {
-        _fftImage = result;
+        _processedImage = result;
+        _currentFilter = 'fft';
         _isProcessing = false;
       });
     } catch (e) {
       setState(() => _isProcessing = false);
-      // ... обработка ошибок
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Ошибка при применении БПФ: $e')),
+        );
+      }
     }
   }
   int _toPowerOfTwo(int n) {
@@ -249,6 +256,292 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
     }
   }
 
+  /// Фильтр Лапласа в пространственной области (свертка с ядром)
+  Future<void> _applyLaplacianSpatial() async {
+    if (_originalImage == null || _isProcessing) return;
+
+    setState(() => _isProcessing = true);
+
+    try {
+      final result = await compute(_computeLaplacianSpatial, {
+        'image': _originalImage!.getBytes(),
+        'width': _originalImage!.width,
+        'height': _originalImage!.height,
+      });
+
+      setState(() {
+        _processedImage = result;
+        _currentFilter = 'laplacian_spatial';
+        _isProcessing = false;
+      });
+    } catch (e) {
+      setState(() => _isProcessing = false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Ошибка при применении фильтра Лапласа: $e')),
+        );
+      }
+    }
+  }
+
+  /// Вычисление фильтра Лапласа в пространственной области в изоляте
+  static img.Image _computeLaplacianSpatial(Map<String, dynamic> data) {
+    final List<int> bytes = data['image'] as List<int>;
+    final int width = data['width'] as int;
+    final int height = data['height'] as int;
+
+    final image = img.Image(width: width, height: height);
+    image.setBytes(bytes);
+
+    // Преобразуем в градации серого для упрощения
+    final grayImage = img.grayscale(image);
+
+    // Ядро Лапласа 3x3 (вариант с диагоналями)
+    // [ 1  1  1 ]
+    // [ 1 -8  1 ]
+    // [ 1  1  1 ]
+    final kernel = [
+      [1, 1, 1],
+      [1, -8, 1],
+      [1, 1, 1],
+    ];
+
+    final resultImage = img.Image(width: width, height: height);
+
+    for (int y = 1; y < height - 1; y++) {
+      for (int x = 1; x < width - 1; x++) {
+        double sum = 0;
+
+        // Применяем свертку
+        for (int ky = -1; ky <= 1; ky++) {
+          for (int kx = -1; kx <= 1; kx++) {
+            final pixel = grayImage.getPixel(x + kx, y + ky);
+            sum += pixel.r * kernel[ky + 1][kx + 1];
+          }
+        }
+
+        // Инвертируем и добавляем к исходному значению для усиления границ
+        int newValue = grayImage.getPixel(x, y).r - sum.toInt();
+        newValue = newValue.clamp(0, 255);
+
+        resultImage.setPixelRgba(x, y, newValue, newValue, newValue, 255);
+      }
+    }
+
+    return resultImage;
+  }
+
+  /// Фильтр на основе оператора Лапласа (частотная область через БПФ)
+  Future<void> _applyLaplacianFrequency() async {
+    if (_originalImage == null || _isProcessing) return;
+
+    setState(() => _isProcessing = true);
+
+    try {
+      // Определяем размер (степень двойки для БПФ)
+      int targetWidth = _toPowerOfTwo(math.min(_originalImage!.width, 512));
+      int targetHeight = _toPowerOfTwo(math.min(_originalImage!.height, 512));
+
+      // Ресайз и градации серого
+      final resizedImg = img.copyResize(
+        _originalImage!,
+        width: targetWidth,
+        height: targetHeight,
+        interpolation: img.Interpolation.average,
+      );
+      final grayImage = img.grayscale(resizedImg);
+
+      // Подготовка данных для БПФ
+      final realData = Float64List(targetWidth * targetHeight);
+      final imagData = Float64List(targetWidth * targetHeight);
+
+      int index = 0;
+      for (var pixel in grayImage) {
+        realData[index] = pixel.r.toDouble();
+        index++;
+      }
+
+      final result = await compute(_computeLaplacianFrequency, {
+        'real': realData,
+        'imag': imagData,
+        'width': targetWidth,
+        'height': targetHeight,
+      });
+
+      setState(() {
+        _processedImage = result;
+        _currentFilter = 'laplacian_freq';
+        _isProcessing = false;
+      });
+    } catch (e) {
+      setState(() => _isProcessing = false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Ошибка при применении фильтра Лапласа (частотная область): $e')),
+        );
+      }
+    }
+  }
+
+  /// Вычисление фильтра Лапласа в частотной области в изоляте
+  static img.Image _computeLaplacianFrequency(Map<String, dynamic> data) {
+    final Float64List realData = data['real'] as Float64List;
+    final Float64List imagData = data['imag'] as Float64List;
+    final int width = data['width'] as int;
+    final int height = data['height'] as int;
+
+    // Преобразуем в 2D массивы
+    List<Float64List> real = List.generate(height, (_) => Float64List(width));
+    List<Float64List> imag = List.generate(height, (_) => Float64List(width));
+
+    for (int y = 0; y < height; y++) {
+      for (int x = 0; x < width; x++) {
+        real[y][x] = realData[y * width + x];
+        imag[y][x] = imagData[y * width + x];
+      }
+    }
+
+    // Применяем БПФ по строкам
+    for (int y = 0; y < height; y++) {
+      _fft1D(real[y], imag[y]);
+    }
+
+    // Применяем БПФ по столбцам
+    for (int x = 0; x < width; x++) {
+      Float64List colReal = Float64List(height);
+      Float64List colImag = Float64List(height);
+      for (int y = 0; y < height; y++) {
+        colReal[y] = real[y][x];
+        colImag[y] = imag[y][x];
+      }
+
+      _fft1D(colReal, colImag);
+
+      for (int y = 0; y < height; y++) {
+        real[y][x] = colReal[y];
+        imag[y][x] = colImag[y];
+      }
+    }
+
+    // Применяем фильтр Лапласа в частотной области
+    // H(u,v) = -4π²(u² + v²) для непрерывного случая
+    // Для дискретного: H(u,v) = 2(cos(2πu/W) + cos(2πv/H) - 2)
+    final centerShiftedReal = List.generate(height, (_) => List.filled(width, 0.0));
+    final centerShiftedImag = List.generate(height, (_) => List.filled(width, 0.0));
+
+    int cx = width ~/ 2;
+    int cy = height ~/ 2;
+
+    for (int y = 0; y < height; y++) {
+      for (int x = 0; x < width; x++) {
+        // Сдвиг спектра
+        int shiftedY = (y + cy) % height;
+        int shiftedX = (x + cx) % width;
+        centerShiftedReal[y][x] = real[shiftedY][shiftedX];
+        centerShiftedImag[y][x] = imag[shiftedY][shiftedX];
+      }
+    }
+
+    // Применяем фильтр Лапласа
+    for (int y = 0; y < height; y++) {
+      for (int x = 0; x < width; x++) {
+        // Нормализованные координаты
+        double u = (x < cx) ? x / width : (x - width) / width;
+        double v = (y < cy) ? y / height : (y - height) / height;
+
+        // Передаточная функция Лапласа
+        double H = -4 * math.pi * math.pi * (u * u + v * v);
+
+        centerShiftedReal[y][x] *= H;
+        centerShiftedImag[y][x] *= H;
+      }
+    }
+
+    // Обратный сдвиг
+    for (int y = 0; y < height; y++) {
+      for (int x = 0; x < width; x++) {
+        int origY = (y + cy) % height;
+        int origX = (x + cx) % width;
+        real[origY][origX] = centerShiftedReal[y][x];
+        imag[origY][origX] = centerShiftedImag[y][x];
+      }
+    }
+
+    // Обратное БПФ по столбцам
+    for (int x = 0; x < width; x++) {
+      Float64List colReal = Float64List(height);
+      Float64List colImag = Float64List(height);
+      for (int y = 0; y < height; y++) {
+        colReal[y] = real[y][x];
+        colImag[y] = imag[y][x];
+      }
+
+      _ifft1D(colReal, colImag);
+
+      for (int y = 0; y < height; y++) {
+        real[y][x] = colReal[y];
+        imag[y][x] = colImag[y];
+      }
+    }
+
+    // Обратное БПФ по строкам
+    for (int y = 0; y < height; y++) {
+      _ifft1D(real[y], imag[y]);
+    }
+
+    // Нормализация результата
+    double minVal = double.infinity;
+    double maxVal = double.negativeInfinity;
+
+    for (int y = 0; y < height; y++) {
+      for (int x = 0; x < width; x++) {
+        double val = real[y][x];
+        if (val < minVal) minVal = val;
+        if (val > maxVal) maxVal = val;
+      }
+    }
+
+    final resultImage = img.Image(width: width, height: height);
+    double range = maxVal - minVal;
+
+    for (int y = 0; y < height; y++) {
+      for (int x = 0; x < width; x++) {
+        int value = range > 0
+            ? ((real[y][x] - minVal) / range * 255).toInt().clamp(0, 255)
+            : 128;
+        resultImage.setPixelRgba(x, y, value, value, value, 255);
+      }
+    }
+
+    return resultImage;
+  }
+
+  /// Обратное БПФ (алгоритм Кули-Тьюки)
+  static void _ifft1D(Float64List real, Float64List imag) {
+    final int n = real.length;
+
+    // Инвертируем мнимую часть для прямого БПФ
+    for (int i = 0; i < n; i++) {
+      imag[i] = -imag[i];
+    }
+
+    // Применяем прямое БПФ
+    _fft1D(real, imag);
+
+    // Инвертируем обратно и нормализуем
+    for (int i = 0; i < n; i++) {
+      real[i] = real[i] / n;
+      imag[i] = -imag[i] / n;
+    }
+  }
+
+  void _resetToOriginal() {
+    setState(() {
+      _processedImage = null;
+      _currentFilter = 'original';
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -268,9 +561,9 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
                     borderRadius: BorderRadius.circular(12),
                     child: _isProcessing
                         ? const Center(child: CircularProgressIndicator())
-                        : _fftImage != null
+                        : _processedImage != null
                             ? Image.memory(
-                                Uint8List.fromList(img.encodePng(_fftImage!)),
+                                Uint8List.fromList(img.encodePng(_processedImage!)),
                                 fit: BoxFit.contain,
                               )
                             : Image.file(
@@ -305,28 +598,40 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
                   ),
                 ),
                 if (_originalImage != null) ...[
-                  const SizedBox(width: 16),
+                  const SizedBox(width: 8),
                   ElevatedButton.icon(
                     onPressed: _isProcessing ? null : _applyFFT,
                     icon: const Icon(Icons.waves),
-                    label: const Text('Применить БПФ'),
+                    label: const Text('БПФ'),
                     style: ElevatedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                     ),
                   ),
-                  const SizedBox(width: 16),
+                  const SizedBox(width: 8),
                   ElevatedButton.icon(
-                    onPressed: _isProcessing
-                        ? null
-                        : () {
-                            setState(() {
-                              _fftImage = null;
-                            });
-                          },
+                    onPressed: _isProcessing ? null : _applyLaplacianSpatial,
+                    icon: const Icon(Icons.blur_on),
+                    label: const Text('Лаплас (простр.)'),
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  ElevatedButton.icon(
+                    onPressed: _isProcessing ? null : _applyLaplacianFrequency,
+                    icon: const Icon(Icons.filter_vintage),
+                    label: const Text('Лаплас (частотн.)'),
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  ElevatedButton.icon(
+                    onPressed: _isProcessing ? null : _resetToOriginal,
                     icon: const Icon(Icons.refresh),
                     label: const Text('Оригинал'),
                     style: ElevatedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                     ),
                   ),
                 ],
